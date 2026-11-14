@@ -2,7 +2,7 @@
 
 SLEEP=15
 
-command -v awk >/dev/null || { echo "You need mwk to be able to run this script."; exit 1; }
+command -v awk >/dev/null || { echo "You need awk to be able to run this script."; exit 1; }
 command -v jq >/dev/null  || { echo "jq  not installed in your system."; exit 1; }
 
 trap 'echo "CTRL-C pressed, exiting.."; exit 0' SIGINT
