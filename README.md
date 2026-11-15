@@ -12,7 +12,7 @@ How does it work?
 
 The project follows a straightforward workflow:
 
-Market Scraper (market)
+Market Scraper.
 Fetches Gold market data through Yahoo Finance.
 Retrieves OHLCV (Open, High, Low, Close, Volume) data.
 Converts and stores the response in JSON format.
@@ -23,11 +23,10 @@ Calculates support and resistance levels.
 Analyzes relative volume.
 Identifies potential Wyckoff events.
 Generates BUY, SELL, or WAIT signals.
-Startup Program (start)
 Coordinates the scraper and analyzer.
 Refreshes the analysis every 60 seconds.
 Continuously monitors available market data.
-Trading Signals
+Trading Signals.
 
 The analyzer currently looks for the following conditions:
 
@@ -56,9 +55,9 @@ Clone the repository
 
 Navigate into the project directory
 
-Make the scripts executable
+Make the script executable
 
-To start the bot, simply execute: './start'
+To start the bot, simply execute: './wyckoff'
 
 
 The program will start immediately and continuously:
@@ -70,7 +69,7 @@ Repeat the process every 60 seconds.
 
 Configuration
 
-The refresh intervals and market data settings can be adjusted directly in the scripts
+The refresh intervals and market data settings can be adjusted directly in the script
 
 You can modify these values to experiment with different timeframes and analysis parameters.
 
