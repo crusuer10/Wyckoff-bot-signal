@@ -1,0 +1,468 @@
+#!/usr/bin/env bash
+
+# ==========================================
+#           Wyckoff bot signal  v2
+# ==========================================
+
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+ORANGE='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+_symbol="GC=F"
+
+OUTPUT="gold_history.json"
+INPUT="gold_history.json"
+
+SIGNALS="wyckoff_signals.log"
+STATE="last_candle.txt"
+
+SLEEP=15
+
+
+for cmd in awk jq curl; do
+    command -v "$cmd" >/dev/null || {
+        echo "[ERROR] Missing dependency: $cmd"
+        exit 1
+    }
+done
+
+trap 'echo "CTRL-C pressed, exiting.."; exit 0' SIGINT
+
+# fetch data
+
+scrape_data() {
+
+    local tmp
+    tmp=$(mktemp) || return 1
+
+    if ! curl -fsSL -L \
+        -H "User-Agent: Mozilla/5.0" \
+        "https://query1.finance.yahoo.com/v8/finance/chart/${_symbol}?range=1mo&interval=15m" \
+        -o "$tmp"; then
+
+        echo "[ERROR] Market data cannot be reached"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    if ! jq -e '.chart.result[0].timestamp' "$tmp" >/dev/null 2>&1; then
+        echo "[ERROR] Invalid market data"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    mv "$tmp" "$OUTPUT"
+}
+
+# Wyckoff analysis
+
+wyckoff_() {
+
+    local now
+    now=$(date +%s)
+
+    jq -r --argjson now "$now" '
+
+    .chart.result[0] as $r |
+    $r.indicators.quote[0] as $q |
+
+    range(0; ($r.timestamp | length)) |
+
+    select(
+        $r.timestamp[.] + 900 <= $now and
+        $q.open[.] != null and
+        $q.high[.] != null and
+        $q.low[.] != null and
+        $q.close[.] != null and
+        $q.high[.] > $q.low[.] and
+        $q.volume[.] != null
+    ) |
+
+    [
+        $r.timestamp[.],
+        $q.open[.],
+        $q.high[.],
+        $q.low[.],
+        $q.close[.],
+        $q.volume[.]
+    ] | @tsv
+
+    ' "$INPUT" |
+
+    awk \
+    -v log_file="$SIGNALS" \
+    -v state_file="$STATE" '
+
+    {
+        o = $2 + 0
+        h = $3 + 0
+        l = $4 + 0
+        c = $5 + 0
+        v = $6 + 0
+
+        # Validate OHLC data.
+
+        if (h < l || o < l || o > h || c < l || c > h)
+            next
+
+        if (h <= l)
+            next
+
+        timestamps[++NR2] = $1
+        opens[NR2] = o
+        highs[NR2] = h
+        lows[NR2] = l
+        closes[NR2] = c
+        volumes[NR2] = v
+    }
+
+    END {
+
+        n = NR2
+
+        if (n < 21) {
+            print "[ERROR] Need at least 21 valid candles"
+            exit 1
+        }
+
+
+        # support / resistance
+
+
+        resistance = highs[n-20]
+        support = lows[n-20]
+
+        avg_volume = 0
+        avg_spread = 0
+        volume_count = 0
+
+        for (i = n-20; i < n; i++) {
+
+            if (highs[i] > resistance)
+                resistance = highs[i]
+
+            if (lows[i] < support)
+                support = lows[i]
+
+            if (volumes[i] > 0) {
+                avg_volume += volumes[i]
+                volume_count++
+            }
+
+            avg_spread += highs[i] - lows[i]
+        }
+
+        if (volume_count > 0)
+            avg_volume /= volume_count
+
+        avg_spread /= 20
+
+
+        # current candle
+
+
+        current_open = opens[n]
+        current_close = closes[n]
+        current_high = highs[n]
+        current_low = lows[n]
+        current_volume = volumes[n]
+
+        spread = current_high - current_low
+        body = current_close - current_open
+
+        if (spread <= 0) {
+            print "[ERROR] Invalid latest candle"
+            exit 1
+        }
+
+        upper_wick = current_high - \
+            ((current_close > current_open) ? current_close : current_open)
+
+        lower_wick = \
+            ((current_close < current_open) ? current_close : current_open) \
+            - current_low
+
+        close_position = (current_close - current_low) / spread
+
+
+        # volume analysis
+
+
+        volume_ratio = 0
+
+        if (avg_volume > 0 && current_volume > 0)
+            volume_ratio = current_volume / avg_volume
+
+        spread_ratio = 0
+
+        if (avg_spread > 0)
+            spread_ratio = spread / avg_spread
+
+        volume_status = "UNAVAILABLE"
+
+        if (current_volume > 0) {
+
+            volume_status = "NORMAL"
+
+            if (volume_ratio > 1.5)
+                volume_status = "HIGH"
+
+            if (volume_ratio > 2)
+                volume_status = "EXTREME"
+        }
+
+        absorption = "NO"
+
+        if (volume_ratio > 1.5 && spread_ratio < 0.7)
+            absorption = "POSSIBLE"
+
+        # market structure
+
+
+        recent_high = highs[n-5]
+        recent_low = lows[n-5]
+
+        previous_high = highs[n-10]
+        previous_low = lows[n-10]
+
+        for (i = n-5; i < n; i++) {
+
+            if (highs[i] > recent_high)
+                recent_high = highs[i]
+
+            if (lows[i] < recent_low)
+                recent_low = lows[i]
+        }
+
+        for (i = n-10; i < n-5; i++) {
+
+            if (highs[i] > previous_high)
+                previous_high = highs[i]
+
+            if (lows[i] < previous_low)
+                previous_low = lows[i]
+        }
+
+        structure = "RANGING"
+
+        if (recent_high > previous_high &&
+            recent_low > previous_low)
+            structure = "BULLISH (HH / HL)"
+
+        else if (recent_high < previous_high &&
+                 recent_low < previous_low)
+            structure = "BEARISH (LH / LL)"
+
+        # wyckoff events
+
+        event = "NONE"
+        reason = "No confirmed event"
+
+        if (volume_ratio > 0) {
+
+            if (current_low < support &&
+                current_close > support &&
+                volume_ratio > 1.2) {
+
+                event = "SPRING"
+                reason = "Potential Spring"
+
+            } else if (current_high > resistance &&
+                       current_close < resistance &&
+                       volume_ratio > 1.2) {
+
+                event = "UPTHRUST"
+                reason = "Potential Upthrust"
+
+            } else if (current_close > resistance &&
+                       volume_ratio > 1.5) {
+
+                event = "SOS"
+                reason = "Potential Sign of Strength"
+
+            } else if (current_close < support &&
+                       volume_ratio > 1.5) {
+
+                event = "SOW"
+                reason = "Potential Sign of Weakness"
+
+            } else if (body < 0 &&
+                       volume_ratio > 1.8 &&
+                       spread_ratio > 1.5 &&
+                       close_position < 0.35) {
+
+                event = "SELLING CLIMAX"
+                reason = "Potential Selling Climax"
+
+            } else if (body > 0 &&
+                       volume_ratio > 1.8 &&
+                       spread_ratio > 1.5 &&
+                       close_position > 0.65) {
+
+                event = "BUYING CLIMAX"
+                reason = "Potential Buying Climax"
+            }
+        }
+
+        # signal engine
+
+        signal = "WAIT"
+        score = 0
+
+        bullish = 0
+        bearish = 0
+
+        if (event == "SPRING" || event == "SOS")
+            bullish = 1
+
+        if (event == "UPTHRUST" || event == "SOW")
+            bearish = 1
+
+        if (bullish || bearish) {
+
+            score += 25
+
+            if (volume_ratio > 1.2)
+                score += 20
+
+            if (bullish && structure == "BULLISH (HH / HL)")
+                score += 15
+
+            if (bearish && structure == "BEARISH (LH / LL)")
+                score += 15
+
+            if (bullish && close_position > 0.65)
+                score += 10
+
+            if (bearish && close_position < 0.35)
+                score += 10
+
+            if (bullish)
+                signal = "BUY CANDIDATE"
+
+            if (bearish)
+                signal = "SELL CANDIDATE"
+        }
+
+        confidence = "WEAK"
+
+        if (score >= 45)
+            confidence = "DEVELOPING"
+
+        if (score >= 70)
+            confidence = "STRONG SETUP"
+
+
+        # signal history
+
+        last_candle = ""
+
+        if ((getline last_candle < state_file) > 0)
+            close(state_file)
+
+        if (timestamps[n] != last_candle) {
+
+            if (signal != "WAIT") {
+
+                printf "%s | GOLD | 15m | %s | %s | %d/100\n", \
+                    timestamps[n], event, signal, score >> log_file
+
+                close(log_file)
+            }
+
+            print timestamps[n] > state_file
+            close(state_file)
+        }
+
+        # display
+
+        print ""
+        print "=========================================="
+        print "             WYCKOFF ANALYSIS"
+        print "=========================================="
+
+        printf "Current price:       %.2f\n", current_close
+
+        print "------------------------------------------"
+
+        printf "Support:             %.2f\n", support
+        printf "Resistance:          %.2f\n", resistance
+
+        print "------------------------------------------"
+        print "MARKET STRUCTURE"
+
+        printf "Structure:           %s\n", structure
+
+        print "------------------------------------------"
+        print "VOLUME ANALYSIS"
+
+        printf "Volume ratio:        %.2fx\n", volume_ratio
+        printf "Volume status:       %s\n", volume_status
+        printf "Spread ratio:        %.2fx\n", spread_ratio
+        printf "Absorption:          %s\n", absorption
+
+        print "------------------------------------------"
+        print "CANDLE ANALYSIS"
+
+        printf "Body:                %.2f\n", body
+        printf "Upper wick:          %.2f\n", upper_wick
+        printf "Lower wick:          %.2f\n", lower_wick
+        printf "Close position:      %.2f\n", close_position
+
+        print "------------------------------------------"
+        print "WYCKOFF DETECTION"
+
+        printf "Event:               %s\n", event
+        printf "Description:         %s\n", reason
+
+        print "------------------------------------------"
+        print "SIGNAL ENGINE"
+
+        printf "Signal:              %s\n", signal
+        printf "Confluence score:    %d/100\n", score
+        printf "Classification:      %s\n", confidence
+
+        print "------------------------------------------"
+        printf "Valid candles:       %d\n", n
+        printf "Volume samples:      %d/20\n", volume_count
+
+        print "=========================================="
+        print ""
+    }
+
+    '
+}
+
+# main
+
+start() {
+
+    while :; do
+
+        clear
+
+        echo -e "${CYAN}Checking GOLD market data...${NC}"
+
+        if scrape_data; then
+
+            echo -e "${GREEN}Market data updated.${NC}"
+
+            echo -e "${ORANGE}Analyzing Wyckoff structure...${NC}"
+
+            if ! wyckoff_; then
+                echo -e "${RED}[ERROR] Analysis failed${NC}"
+            fi
+
+        else
+
+            echo -e "${RED}[ERROR] Data update failed${NC}"
+
+        fi
+
+        sleep "$SLEEP"
+    done
+}
+
+start
