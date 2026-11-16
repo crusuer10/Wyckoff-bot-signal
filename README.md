@@ -58,6 +58,7 @@ Navigate into the project directory
 Make the script executable
 
 To start the bot, simply execute: './wyckoff'
+
 You can also see wyckoff theory by running: 'man ./wyckoff_theory.7'
 
 The program will start immediately and continuously:
